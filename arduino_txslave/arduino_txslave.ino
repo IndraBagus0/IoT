@@ -20,6 +20,39 @@ GravityTDS gravityTds;
 float temperatureC = 25.0;
 int maxvisibl = 600, minvisibl = 0;
 
+float numerator = 0, denominator = 0;
+float output = 0;
+
+struct FuzzySet {
+  float a, b, c, d;
+  FuzzySet(float _a, float _b, float _c, float _d)
+    : a(_a), b(_b), c(_c), d(_d) {}
+  float membership(float x) {
+    if (x <= a || x >= d)
+      return 0;
+    else if (x >= b && x <= c)
+      return 1;
+    else if (x > a && x < b)
+      return (x - a) / (b - a);
+    else
+      return (d - x) / (d - c);
+  }
+};
+
+FuzzySet asam(0, 0, 5, 7);
+FuzzySet netral(6.5, 7, 8, 8.5);
+FuzzySet basa(8, 9, 14, 14);
+FuzzySet baik(0, 0, 200, 500);
+FuzzySet cukup(300, 500, 700, 1000);
+FuzzySet tidak_baik(900, 1000, 1000, 1000);
+FuzzySet jernih(0, 0, 2, 5);
+FuzzySet cukup_jernih(4, 10, 15, 25);
+FuzzySet keruh(24, 25, 2000 , 2000);
+
+float defuzzifySugeno(float numerator, float denominator) {
+  return (denominator == 0) ? 0 : numerator / denominator;
+}
+
 void setup() {
   Serial.begin(9600);
   mySerial.begin(9600);  // Software Serial untuk komunikasi eksternal
@@ -49,19 +82,92 @@ void loop() {
 
   // **Baca Turbidity**
   int rawTDValue = analogRead(TD_SENSOR_PIN);
-  if (rawTDValue > maxvisibl) rawTDValue = maxvisibl;
-  int percenTD = map(rawTDValue, maxvisibl, minvisibl, 0, 100);
+  int turbidityNTU = map(rawTDValue, 0, 640, 100, 0);
+
+  if (turbidityNTU < 0)
+    turbidityNTU = 0;
+
+  float data_pH = pHValue;
+  float data_TDS = tdsValue;
+  float data_kekeruhan = turbidityNTU;
+
+  // fuzzy logic sugeno
+  float input_pH = pHValue;
+  float input_TDS = tdsValue;
+  float input_Kekeruhan = turbidityNTU;
+
+  float rules[27][4] = {
+    { asam.membership(input_pH), baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 100 },
+    { asam.membership(input_pH), baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 75 },
+    { asam.membership(input_pH), baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
+    { asam.membership(input_pH), cukup.membership(input_TDS), jernih.membership(input_Kekeruhan), 75 },
+    { asam.membership(input_pH), cukup.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
+    { asam.membership(input_pH), cukup.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
+    { asam.membership(input_pH), tidak_baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
+    { asam.membership(input_pH), tidak_baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
+    { asam.membership(input_pH), tidak_baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
+    { netral.membership(input_pH), baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 100 },
+    { netral.membership(input_pH), baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 100 },
+    { netral.membership(input_pH), baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 75 },
+    { netral.membership(input_pH), cukup.membership(input_TDS), jernih.membership(input_Kekeruhan), 100 },
+    { netral.membership(input_pH), cukup.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 75 },
+    { netral.membership(input_pH), cukup.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
+    { netral.membership(input_pH), tidak_baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 75 },
+    { netral.membership(input_pH), tidak_baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
+    { netral.membership(input_pH), tidak_baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
+    { basa.membership(input_pH), baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 100 },
+    { basa.membership(input_pH), baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 100 },
+    { basa.membership(input_pH), baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 75 },
+    { basa.membership(input_pH), cukup.membership(input_TDS), jernih.membership(input_Kekeruhan), 100 },
+    { basa.membership(input_pH), cukup.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 75 },
+    { basa.membership(input_pH), cukup.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
+    { basa.membership(input_pH), tidak_baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 75 },
+    { basa.membership(input_pH), tidak_baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
+    { basa.membership(input_pH), tidak_baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 }
+  };
+
+  float numerator = 0, denominator = 0;
+
+  for (int i = 0; i < 27; i++) {
+    float weight = rules[i][0] * rules[i][1] * rules[i][2];
+    numerator += weight * rules[i][3];
+    denominator += weight;
+  }
+
+  float output = defuzzifySugeno(numerator, denominator);
+  Serial.println("=== Fuzzy Membership Values ===");
+  Serial.print("Asam: ");
+  Serial.println(asam.membership(input_pH));
+  Serial.print("Netral: ");
+  Serial.println(netral.membership(input_pH));
+  Serial.print("Basa: ");
+  Serial.println(basa.membership(input_pH));
+  Serial.print("Baik: ");
+  Serial.println(baik.membership(input_TDS));
+  Serial.print("Cukup: ");
+  Serial.println(cukup.membership(input_TDS));
+  Serial.print("Tidak Baik: ");
+  Serial.println(tidak_baik.membership(input_TDS));
+  Serial.print("Jernih: ");
+  Serial.println(jernih.membership(input_Kekeruhan));
+  Serial.print("Cukup Jernih: ");
+  Serial.println(cukup_jernih.membership(input_Kekeruhan));
+  Serial.print("Keruh: ");
+  Serial.println(keruh.membership(input_Kekeruhan));
+  Serial.println("===============================");
 
   // **Tampilkan data ke Serial Monitor**
-  Serial.print("Suhu (°C): ");
+  Serial.print(" | Suhu (°C): ");
   Serial.print(temperatureC);
   Serial.print(" | pH: ");
   Serial.print(pHValue);
   Serial.print(" | TDS (ppm): ");
   Serial.print(tdsValue);
   Serial.print(" | Turbidity: ");
-  Serial.print(percenTD);
-  Serial.println("%");
+  Serial.print(turbidityNTU);
+  Serial.print("NTU");
+  Serial.print(" | Kelayakan Air: ");
+  Serial.println(output);
 
   // **Kirim data melalui Software Serial (TX)**
   mySerial.print(temperatureC);
@@ -70,7 +176,9 @@ void loop() {
   mySerial.print(",");
   mySerial.print(tdsValue);
   mySerial.print(",");
-  mySerial.println(percenTD);
+  mySerial.println(turbidityNTU);
+  mySerial.print(",");
+  mySerial.println(output);
 
-  delay(1000);  // delay 1 detik membaca ulang
+  delay(5000);  // delay 5 detik membaca ulang
 }
