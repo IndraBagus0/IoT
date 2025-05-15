@@ -8,8 +8,8 @@
 #define PH_SENSOR_PIN A2   // Sensor pH pada pin A2
 #define TD_SENSOR_PIN A3   // Sensor Turbidity pada pin A3
 
-#define RX_PIN 2  // Software Serial RX (Tidak dipakai untuk TX-only)
-#define TX_PIN 3  // Software Serial TX (Untuk mengirim data)
+#define RX_PIN 2
+#define TX_PIN 3
 
 SoftwareSerial mySerial(RX_PIN, TX_PIN);  // RX, TX
 
@@ -17,157 +17,204 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 GravityTDS gravityTds;
 
-float temperatureC = 25.0;
-int maxvisibl = 600, minvisibl = 0;
+float voltNTU = 0;
+float ntuNTU = 0;
 
-float numerator = 0, denominator = 0;
-float output = 0;
-
-struct FuzzySet {
-  float a, b, c, d;
-  FuzzySet(float _a, float _b, float _c, float _d)
-    : a(_a), b(_b), c(_c), d(_d) {}
-  float membership(float x) {
-    if (x <= a || x >= d)
-      return 0;
-    else if (x >= b && x <= c)
-      return 1;
-    else if (x > a && x < b)
-      return (x - a) / (b - a);
-    else
-      return (d - x) / (d - c);
-  }
-};
-
-FuzzySet asam(0, 0, 5, 7);
-FuzzySet netral(6.5, 7, 8, 8.5);
-FuzzySet basa(8, 9, 14, 14);
-
-FuzzySet baik(0, 0, 200, 500);
-FuzzySet cukup(300, 500, 700, 1000);
-FuzzySet tidak_baik(900, 1000, 1000, 1000);
-
-FuzzySet jernih(0, 0, 2, 5);
-FuzzySet cukup_jernih(4, 10, 15, 25);
-FuzzySet keruh(24, 25, 2000, 2000);
-
-float defuzzifySugeno(float numerator, float denominator) {
-  return (denominator == 0) ? 0 : numerator / denominator;
+float square(float x) {
+  return x * x;
 }
+
+float round_to_dp(float value, int decimal_places) {
+  float factor = pow(10, decimal_places);
+  return round(value * factor) / factor;
+}
+
+// === Fuzzy Membership Functions ===
+
+float func_ph_asam(float ph) {
+  if (ph <= 6.5) return 1;
+  else if (ph <= 7) return (7 - ph) / 0.5;
+  return 0;
+}
+
+float func_ph_netral(float ph) {
+  if (ph <= 6.5) return 0;
+  else if (ph <= 7) return (ph - 6.5) / 0.5;
+  else if (ph <= 8) return 1;
+  else if (ph <= 8.5) return (8.5 - ph) / 0.5;
+  return 0;
+}
+
+float func_ph_basa(float ph) {
+  if (ph <= 8) return 0;
+  else if (ph <= 8.5) return (ph - 8) / 0.5;
+  return 1;
+}
+
+float func_tds_baik(float tds) {
+  if (tds <= 300) return 1;
+  else if (tds <= 500) return (500 - tds) / 200.0;
+  return 0;
+}
+
+float func_tds_cukup(float tds) {
+  if (tds <= 300 || tds >= 1100) return 0;
+  else if (tds <= 500) return (tds - 300) / 200.0;
+  else if (tds <= 900) return 1;
+  else if (tds < 1100) return (1100 - tds) / 200.0;
+  return 0;
+}
+
+float func_tds_tidak_baik(float tds) {
+  if (tds <= 900) return 0;
+  else if (tds <= 1000) return (tds - 900) / 100.0;
+  return 1;
+}
+
+float func_turb_jernih(float turb) {
+  if (turb <= 4) return 1;
+  else if (turb <= 5) return (5 - turb) / 1.0;
+  return 0;
+}
+
+float func_turb_cukup_jernih(float turb) {
+  if (turb <= 4 || turb >= 25) return 0;
+  else if (turb <= 5) return (turb - 4) / 1.0;
+  else if (turb <= 20) return 1;
+  else if (turb < 25) return (25 - turb) / 5.0;
+  return 0;
+}
+
+float func_turb_keruh(float turb) {
+  if (turb <= 24) return 0;
+  else if (turb <= 25) return (turb - 24) / 1.0;
+  return 1;
+}
+
+float fuzzy_and_min(float a, float b, float c) {
+  return min(a, min(b, c));
+}
+
+float rules_sugeno(float ph, float tds, float turb) {
+  float phSet[3] = {
+    func_ph_asam(ph),
+    func_ph_netral(ph),
+    func_ph_basa(ph)
+  };
+
+  float tdsSet[3] = {
+    func_tds_baik(tds),
+    func_tds_cukup(tds),
+    func_tds_tidak_baik(tds)
+  };
+
+  float turbSet[3] = {
+    func_turb_jernih(turb),
+    func_turb_cukup_jernih(turb),
+    func_turb_keruh(turb)
+  };
+
+  float out_layak = 100;
+  float out_tidak_layak = 50;
+  float numerator = 0;
+  float denominator = 0;
+
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      for (int k = 0; k < 3; k++) {
+        float alpha = fuzzy_and_min(phSet[i], tdsSet[j], turbSet[k]);
+        float z = out_tidak_layak;
+
+        if (i == 1) {
+          if ((j == 0 && k == 1) || (j == 0 && k == 0) || (j == 1 && k == 0) || (j == 1 && k == 1)) {
+            z = out_layak;
+          }
+        }
+
+        numerator += alpha * z;
+        denominator += alpha;
+      }
+    }
+  }
+
+  if (denominator == 0) return 0;
+  return numerator / denominator;
+}
+
+// === Setup & Loop ===
 
 void setup() {
   Serial.begin(9600);
-  mySerial.begin(9600);  // Software Serial untuk komunikasi eksternal
+  mySerial.begin(9600);
   sensors.begin();
 
-  // Setup TDS Sensor
   gravityTds.setPin(TDS_SENSOR_PIN);
-  gravityTds.setAref(5.0);       // Referensi tegangan (5V untuk Arduino Nano)
-  gravityTds.setAdcRange(1024);  // ADC 10-bit (0 - 1023)
+  gravityTds.setAref(5.0);
+  gravityTds.setAdcRange(1024);
   gravityTds.begin();
 }
 
 void loop() {
-  // **Baca Suhu dari DS18B20**
   sensors.requestTemperatures();
-  temperatureC = sensors.getTempCByIndex(0);
+  float tempC = sensors.getTempCByIndex(0);
 
-  // **Baca pH**
-  int rawPHValue = analogRead(PH_SENSOR_PIN);
-  float voltagePH = rawPHValue * (5.0 / 1023.0);   // Konversi ADC ke Volt
-  float pHValue = (voltagePH - 2.89) * 3.5 + 7.0;  // Kalibrasi Sensor
+  // pH Kalibration
+  int rawPH = analogRead(PH_SENSOR_PIN);
+  float voltPH = rawPH * (5.0 / 1023.0);
+  // float phVal = -4.76 * voltPH + 20.86;
+  // Serial.println(voltPH);
+  float phVal = -6.822 * voltPH + 27.934;
 
-  // **Baca TDS**
-  gravityTds.setTemperature(temperatureC);  // Kompensasi suhu
+  
+  gravityTds.setTemperature(tempC);
   gravityTds.update();
-  float tdsValue = gravityTds.getTdsValue();  // ppm
+  float tdsVal = gravityTds.getTdsValue();
 
-  // **Baca Turbidity**
-  int rawTDValue = analogRead(TD_SENSOR_PIN);
-  int turbidityNTU = map(rawTDValue, 0, 640, 100, 0);
-
-  if (turbidityNTU < 0)
-    turbidityNTU = 1;
-
-  float data_pH = pHValue;
-  float data_TDS = tdsValue;
-  float data_kekeruhan = turbidityNTU;
-
-  // fuzzy logic sugeno
-  float input_pH = pHValue;
-  float input_TDS = tdsValue;
-  float input_Kekeruhan = turbidityNTU;
-
-  float rules[27][4] = {
-    { asam.membership(input_pH), baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), cukup.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), cukup.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), cukup.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), tidak_baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), tidak_baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
-    { asam.membership(input_pH), tidak_baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-
-    { netral.membership(input_pH), baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 100 },
-    { netral.membership(input_pH), baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 100 },
-    { netral.membership(input_pH), baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-    { netral.membership(input_pH), cukup.membership(input_TDS), jernih.membership(input_Kekeruhan), 100 },
-    { netral.membership(input_pH), cukup.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 100 },
-    { netral.membership(input_pH), cukup.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-    { netral.membership(input_pH), tidak_baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
-    { netral.membership(input_pH), tidak_baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
-    { netral.membership(input_pH), tidak_baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-
-    { basa.membership(input_pH), baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), cukup.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), cukup.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), cukup.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), tidak_baik.membership(input_TDS), jernih.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), tidak_baik.membership(input_TDS), cukup_jernih.membership(input_Kekeruhan), 50 },
-    { basa.membership(input_pH), tidak_baik.membership(input_TDS), keruh.membership(input_Kekeruhan), 50 }
-  };
-
-  float numerator = 0, denominator = 0;
-
-  for (int i = 0; i < 27; i++) {
-    float weight = rules[i][0] * rules[i][1] * rules[i][2];
-    numerator += weight * rules[i][3];
-    denominator += weight;
+  // int rawTurb = analogRead(TD_SENSOR_PIN);
+  // int turbNTU = map(rawTurb, 0, 640, 100, 0);
+  // float turbNTU = reverseMapFloat(rawTurb, 300.0, 850.0, 4500.0, 1400.0);
+  // if (turbNTU < 0) turbNTU = 1;
+  float voltNTU = 0;
+  for (int i = 0; i < 800; i++) {
+    int raw = analogRead(TD_SENSOR_PIN);
+    float v = (float)raw / 1023.0 * 5.0;  // Konversi ADC ke voltase 0-5V
+    voltNTU += v;
   }
+  voltNTU = voltNTU / 800.0;
+  voltNTU = round_to_dp(voltNTU, 2);
 
-  float output = defuzzifySugeno(numerator, denominator);
-  String statusKelayakan;
-  if (output >= 50) {
-    statusKelayakan = "Layak";
+  if (voltNTU < 2.5) {
+    voltNTU = 3000;
   } else {
-    statusKelayakan = "Tidak Layak";
+    voltNTU = -1120.4 * square(voltNTU) + 5742.3 * voltNTU - 4353.8;
   }
-  // **Tampilkan data ke Serial Monitor**
+
+  if (ntu < 0) ntu = 0;
+  // float fuzzy
+  float fuzzy_result = rules_sugeno(phVal, tdsVal, turbNTU);
+  // fuzzy logic sugeno
   Serial.print("Suhu (°C): ");
-  Serial.print(temperatureC);
+  Serial.print(tempC);
   Serial.print(" | pH: ");
-  Serial.print(pHValue);
+  Serial.print(phVal);
   Serial.print(" | TDS (ppm): ");
-  Serial.print(tdsValue);
+  Serial.print(tdsVal);
   Serial.print(" | Turbidity: ");
-  Serial.print(turbidityNTU);
+  Serial.print(turbNTU);
   Serial.print("NTU");
   Serial.print(" | Kelayakan Air: ");
-  Serial.println(statusKelayakan);
+  Serial.println(fuzzy_result);
 
   // **Kirim data melalui Software Serial (TX)**
-  mySerial.print(temperatureC);
+  mySerial.print(tempC);
   mySerial.print(",");
-  mySerial.print(pHValue);
+  mySerial.print(phVal);
   mySerial.print(",");
-  mySerial.print(tdsValue);
+  mySerial.print(tdsVal);
   mySerial.print(",");
-  mySerial.println(turbidityNTU);
+  mySerial.println(turbNTU);
   mySerial.print(",");
-  mySerial.println(statusKelayakan);
+  mySerial.println(fuzzy_result);
 
-  delay(5000);  // delay 5 detik membaca ulang
+  delay(1000);  // delay 5 detik membaca ulang
 }
